@@ -1,0 +1,355 @@
+---
+title: "Course Project - Predicting Weight-lifting Exercise Quality"
+author: "David Effendi"
+date: "January 28, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Course Project for C08 Practical Machine Learning
+
+This is the peer-reviewed assignment for the eighth course, Practical Machine Learning,  in the Data Science specialization track from Johns Hopkins University on Coursera.
+     
+## Executive Summary
+
+The goal of this study is to predict the quality of weight-lifting exercises, e using data gathered from accelerometers on the belt, forearm, arm, and dumbell of the subjects.
+    
+The chosen algorithm was Random Forest, in anticipation of the high potential of multi-collinearity in the data. The Random Forest algorithm requires that all of the predictors contain no missing data, and much of the data preparation step was spent on meeting this requirement, a large number of variables as well as some incomplete cases were omitted.
+    
+Nevertheless the resulting 53 predictor variables and 19216 observations used for training yielded an exceptionally good model, the Out Of Bag estimated classification error rate was 0.14%, and all of the 20 test cases were correctly classified.
+    
+## Helper Functions
+
+The raw training data contained a lot of variables with missing or invalid data (e.g. "#DIV/0!" ), and yet Random Forest requires complete information (no missing data in all predictor variables and all rows ).
+    
+Thus, a few helper functions were written to help satisfy this requirement in a programmatic way, as manual visual inspection would be unreliable in such a large dataset.
+    
+These helper functions were used repeatedly in preparing the training and testing datasets. They are used for:
+    
+- checking the data type of the variables,
+- obtaining basic summaries of the values contained (e.g. frequency count or descriptive stats)
+- checking for presence and percentage of missing values
+
+```{r, echo=FALSE, results='hide'}
+##########################################################
+###   HELPER FUNCTIONS                                 ###
+##########################################################
+
+inspect <- function( daDF ) {
+    Mmeta <- list()
+    for( i in 1 : dim( daDF )[ 2 ] ){
+        uvalues <- unique( daDF[ , i ] )
+        ucount <- length( uvalues )
+        cname <- names( daDF)[ i ]
+        cclass <- class( daDF[ , i ] )
+        clevcount <- NA
+        if( cclass == "factor" ){
+            clevcount <-length( levels( daDF[ , i ] ) )
+        }
+        csumm <- summary( daDF[ , i ] )
+        hasBlanks <- TRUE %in% grepl( "^\\s*$", uvalues )
+        hasNAs <- NA %in% uvalues
+        pctNA <- sum( is.na( daDF[ , i ] ) ) / length( daDF[ , i ] )
+        daCol <- list( uValues = uvalues,
+                       uCount = ucount,
+                       name = cname,
+                       class = cclass,
+                       levelCount = clevcount,
+                       summary = csumm,
+                       hasBlanks = hasBlanks,
+                       hasNAs = hasNAs,
+                       pctNA = pctNA
+                      )
+        Mmeta[[ i ]] <- daCol
+    }
+    return( Mmeta )      
+}
+
+
+
+show_col <- function( n ) {
+    message( paste( "NAME:", Mmeta[[ n ]]$name ) )
+    message( paste( "CLASS:", Mmeta[[ n ]]$class, " LEV COUNT:", Mmeta[[ n ]]$levelCount ) )
+    message( paste( "HAS BLANKS:", Mmeta[[ n ]]$hasBlanks, "  HAS NAS:", Mmeta[[ n ]]$hasNAs, "pctNA:", Mmeta[[ n ]]$pctNA ) )
+    print( Mmeta[[ n ]]$summary )
+    message( "======================" )   
+}
+
+
+
+show_Mmeta <- function( n=NULL ) {
+    if( !is.null(n) ) {
+       show_col( n )
+    } else {
+        print( "ALL" )
+        for( i in 1 : length( Mmeta ) ){ # get an overview of the data
+            show_col( i )
+        }
+    }
+}       
+```
+
+## Data Preparation
+
+### Cleaning the Training Dataset
+
+```{r, echo=FALSE, results='hide', fig.show='hide'}
+##########################################################
+###   DATA CLEANING & PREPARATION                      ###
+##########################################################
+
+### 1. load the data
+inTraining <- read.table( './data/pml-training.csv',
+                          header = TRUE,
+                         sep = ",",
+                         row.names = 1
+                         )
+### 2. look at the data, uncomment to check
+### View( inTraining )   
+Mmeta <- inspect( inTraining )
+### show_Mmeta( 135 )
+
+### 3. fix #DIV/0!, found in numerous columns, for example col 135 min_yaw_forearm
+### this happens to take care of the Blanks too
+for( i in 1 : length( Mmeta ) ) {
+    if( "#DIV/0!" %in% Mmeta[[ i ]]$uValues ) {
+        ixs <- which( inTraining[ , i ] == "#DIV/0!" )
+        inTraining[ ixs, i ] <- NA
+        inTraining[ , i ] <- as.numeric( inTraining[ , i ] )
+    }
+}
+
+### 4. verify no more columns with #DIV/0!
+rm( Mmeta )
+Mmeta <- inspect( inTraining )
+### show_Mmeta()  # or show_Mmeta( 135 ), uncomment to check
+
+### 5. verify no more columns with Blanks
+bl <- c()
+for( i in 1:length(Mmeta) ){
+   if( Mmeta[[ i ]]$hasBlanks ) {
+     bl <- c( bl, Mmeta[[i]]$name )
+     print( Mmeta[[i]]$name )
+   }
+}
+bl
+
+### 6. observe the NAs
+nas <- c()
+for( i in 1 : length( Mmeta ) ){
+    nas <- c( nas, Mmeta[[ i ]]$pctNA )
+}
+
+### 7. discard columns with > 3% NAs
+discard = c()
+for( i in 1 : length( nas ) ){
+    if( nas[ i ] > 0.03 ){
+        discard <- c( discard, i )
+    }
+}
+inTraining <- inTraining[ , -discard ]
+dim( inTraining )
+
+### 8. remove incomplete cases
+inTraining <- inTraining[ complete.cases( inTraining ), ]
+dim( inTraining )
+
+### 9. remove columns username and timestamps
+inTraining <- inTraining[ , ( -1 : -5 ) ]
+dim( inTraining )
+```
+
+Nine steps were applied to clean up the Training dataset (code contains comments for locating these nine steps):
+
+1. load the data, using ```read.table()```
+
+2. look at the data, both visually and programmatically using the helper functions' ```show_Mmeta()``` function
+
+3. fix #DIV/0!, found in numerous columns, for example col 135 min_yaw_forearm. Discovered that many variables contained this invalid value. As it is a string, the variables were incorrectly read as type character. All occurences of "#DIV/0!" were replaced to NAs and their variables were recast into numeric.
+
+4. verify no more columns with "#DIV/0!", using the helper functions
+
+5. verify no more columns with Blanks, using the helper functions
+
+6. observe the NAs, plotting the percentage of NAs across variables. It was observed that a portion of variables have huge percentage of NAs, and a small number of variables have 'good' percentage of NAs, with only less than 3% NA.
+
+```{r, echo=FALSE, results='hide'}
+plot( nas,
+      main = "Training Dataset - Pctg NAs Across Variables",
+      xlab = "Variable Index No.",
+      ylab = "Pctg NA"
+    )
+```
+
+7. discard columns with > 3% NAs. Those variables were identified and discarded from the training dataset.
+
+8. remove incomplete cases, using the ```complete.cases()``` function
+
+9. remove columns username and timestamps, as these columns were not part of predictors (maybe the two timestamps part1 and part2 could be used as predictors, but since there was no codebook available, it's best to just exclude them). The new_window variable was also dropped since it didn't contain any variance in the values, can't be used as a predictor in classification.
+
+
+### Cleaning the Testing Dataset
+
+```{r, echo=FALSE, results='hide'}
+##########################################################
+###   CLEAN TEST DATA                                  ###
+##########################################################
+### we'll repeat steps 1-9 above on the test dataset
+
+### 1. load the data
+inTesting <- read.table( './data/pml-testing.csv',
+                          header = TRUE,
+                         sep = ",",
+                         row.names = 1
+                         )
+### 2. look at the data, uncomment to check
+### View( inTesting )   
+rm( Mmeta )
+Mmeta <- inspect( inTesting )
+### show_Mmeta( 135 )
+
+### 3. fix #DIV/0!, found in numerous columns, for example col 135 min_yaw_forearm
+### this happens to take care of the Blanks too
+for( i in 1 : length( Mmeta ) ) {
+    if( "#DIV/0!" %in% Mmeta[[ i ]]$uValues ) {
+        ixs <- which( inTesting[ , i ] == "#DIV/0!" )
+        inTesting[ ixs, i ] <- NA
+        inTesting[ , i ] <- as.numeric( inTesting[ , i ] )
+    }
+}
+
+### 4. verify no more columns with #DIV/0!
+rm( Mmeta )
+Mmeta <- inspect( inTesting )
+### show_Mmeta()  # or show_Mmeta( 135 ), uncomment to check
+
+### 5. verify no more columns with Blanks
+bl <- c()
+for( i in 1:length(Mmeta) ){
+   if( Mmeta[[ i ]]$hasBlanks ) {
+     bl <- c( bl, Mmeta[[i]]$name )
+     print( Mmeta[[i]]$name )
+   }
+}
+bl
+
+### 6. observe the NAs
+nas <- c()
+for( i in 1 : length( Mmeta ) ){
+    nas <- c( nas, Mmeta[[ i ]]$pctNA )
+}
+
+### 7. discard columns with > 3% NAs
+discard = c()
+for( i in 1 : length( nas ) ){
+    if( nas[ i ] > 0.03 ){
+        discard <- c( discard, i )
+    }
+}
+inTesting <- inTesting[ , -discard ]
+dim( inTesting )
+
+### 8. remove incomplete cases
+inTesting <- inTesting[ complete.cases( inTesting ), ]
+dim( inTesting )
+
+### 9. remove columns username and timestamps / dates
+inTesting <- inTesting[ , ( -1 : -5 ) ]
+dim( inTesting )
+```
+
+Next, the same nine steps above were applied to the testing set to prepare it for Random Forest. The figure below shows the percentage NAs on the testing dataset (step 6):
+
+```{r, echo=FALSE, results='hide'}
+plot( nas,
+      main = "Testing Dataset - Pctg NAs Across Variables",
+      xlab = "Variable Index No.",
+      ylab = "Pctg NA"
+    )
+```
+
+### Matching Training and Testing Dataset Columns 
+
+```{r, echo=FALSE, results='hide'}
+######################################################
+###   TRAINING - TESTING DATASET COLUMN MATCHING   ###
+######################################################
+### upon inspection, the training dataset has many more columns than the test dataset
+### now we'll discard columns from the training data set which are NOT contained in the test dataset
+
+not_in_testdata <- c()
+for( i in 1 : ( length( names( inTraining ) )-1) ){
+    nn <- names( inTraining )[ i ]
+    intestinglist <- names( inTesting )
+    if( !(nn %in% intestinglist ) ){
+        not_in_testdata <- c( not_in_testdata, which( names( inTraining ) == nn ) )
+    }
+}
+
+### obtain final training dataset
+inTraining <- inTraining[ , -not_in_testdata]
+dim( inTraining )
+dim( inTesting )    
+
+```
+
+At this point, it was discovered that the number of columns in the training set differs from the testing set. The trining set contained many more columns and unless the columns match exactly, Random Forest can't make predictions on the testing set. So the excess columns from the training set were removed. Final dimensions of the training set was:
+
+```{r, echo=TRUE, results='as-is'}
+
+dim( inTraining )
+```
+
+and Testing set had:
+
+```{r, echo=TRUE, results='as-is'}
+
+dim( inTesting )
+```
+
+
+## Random Forest Model Fitting
+
+```{r, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+##########################################################
+###   MODEL FITTING WITH RANDOM FOREST                 ###
+##########################################################
+
+library( randomForest )
+library( caret )
+
+set.seed( 56789 )
+
+RFfit <- randomForest( classe ~ .,
+                       data = inTraining,
+                       importance = TRUE
+                     )
+```
+
+The nature of the problem seemed non-linear, and since accelerometer data is typically broken down to X, Y and Z correlated measures, it probably have high multicolinearity amongst the predictor variables, so a tree-based algorithm would probably perform better.
+Tree-based algorithms could benefit from combining them with resampling, and Random Forest was chosen since it employs resampling both on the cases (rows) and predictors (columns)
+Number of trees grown was 500 and number of predictors sampled at each split was 7 ( floor( m = sqrt( p ) ), as this is a classification task )
+
+Since Random Forest already incorporates randomized subsetting of the training dataset when building the trees, it already has a method for cross-validating the results. The OOB (Out Of Bag) measures reported on the output came from applying the model onto the subset that was not selected (out of bag) when a tree was built. So the OOB measures are 'compatible' to cross-validation results in other techniques, and there's no need to carry out additional cross-validation procedures ( Ref:  http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr )
+
+The OOB estimate of classification error rate was very small, 0.14%, indicating a potentially good fit ( and indeed, when applied onto the 20 test cases, all were verified to be correct ).
+
+```{r, echo=FALSE, results='as-is'}
+RFfit
+varImpPlot( RFfit )
+```
+
+The Variable Importance Plots showed the decrease in classification accuracy when that variable was excluded, and more important variables are placed higher. They seem to suggest that waist movement (captured by the sensor attached to the belt) had larger influence compared to movements on other parts (dumbell or forearm). Unfortunately no codebook can be found, so the 'window' variable may not be interpretable.
+
+## Prediction
+
+When applied to the test data, all 20 cases were correctly classified.
+(Output not shown here to keep the Coursera Honor Code)
+
+```{r, echo=TRUE, results='hide'}
+yhat <- predict( RFfit, newdata=inTesting[, -1*(dim(inTesting)[2] ) ] ) # exclude the row num variable
+```
+
